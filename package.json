@@ -1,0 +1,21 @@
+{
+  "name": "conciliador-saldos-balancete",
+  "version": "1.0.0",
+  "description": "Conciliador de saldos iniciais x finais do Balancete TCEMG entre meses",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
+    "jszip": "^3.10.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "vite": "^8.1.0"
+  }
+}
