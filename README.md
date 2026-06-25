@@ -45,6 +45,15 @@ detalhe) também é recriada automaticamente: cada linha de detalhe é
 recriada zerada (regra 5) e o totalizador some essas linhas — resultando
 num bloco com Saldo Final `0,00`, como esperado.
 
+### Omissão de linha totalmente zerada
+
+Exigência do tribunal: depois de aplicadas as regras acima, qualquer linha
+(de detalhe **ou** totalizadora) que fique com **Saldo Inicial, Débito,
+Crédito e Saldo Final todos `0,00`** não é escrita no arquivo final — ela
+simplesmente não é informada. Isso vale tanto pra linha que já nasceu
+zerada quanto pra linha recriada pela regra 5 que feche em zero sem nenhuma
+movimentação.
+
 A lógica de conciliação está isolada em `src/balancete.js` (sem dependência
 de React/DOM), o que facilita testar e dar manutenção.
 

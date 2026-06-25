@@ -118,6 +118,10 @@ export default function App() {
                 <strong>{resultado.resumo.linhasCriadas}</strong> linhas recriadas (existiam no
                 mês anterior e não existem mais no atual)
               </li>
+              <li>
+                <strong>{resultado.resumo.linhasOmitidas}</strong> linhas omitidas (saldo
+                inicial, saldo final, débito e crédito zerados)
+              </li>
             </ul>
             <button className="botao-secundario" onClick={handleBaixar}>
               Baixar BALANCETE.CSV corrigido

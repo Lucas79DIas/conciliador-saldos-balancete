@@ -200,6 +200,18 @@ function registroParaLinha(registro) {
   ].join(';');
 }
 
+// exigência do tribunal: uma linha com Saldo Inicial, Débito, Crédito e Saldo
+// Final todos zerados não deve ser informada no arquivo.
+const TOLERANCIA_ZERO = 0.005; // evita problema de arredondamento de ponto flutuante
+function linhaTotalmenteZerada(registro) {
+  return (
+    Math.abs(registro.saldoInicial) < TOLERANCIA_ZERO &&
+    Math.abs(registro.debito) < TOLERANCIA_ZERO &&
+    Math.abs(registro.credito) < TOLERANCIA_ZERO &&
+    Math.abs(registro.saldoFinal) < TOLERANCIA_ZERO
+  );
+}
+
 /**
  * Aplica a conciliação: recebe o CSV do mês atual e o CSV do mês anterior,
  * devolve o CSV corrigido (mês atual com saldo inicial ajustado, linhas
@@ -224,6 +236,7 @@ export function conciliarBalancete(textoCsvAtual, textoCsvAnterior) {
     linhasAlteradas: 0,
     chavesNaoEncontradas: 0,
     linhasCriadas: 0,
+    linhasOmitidas: 0,
     totalizadores: 0,
   };
 
@@ -274,6 +287,10 @@ export function conciliarBalancete(textoCsvAtual, textoCsvAnterior) {
         linhaTotalizador = criarLinhaZerada(blocoAnterior.tipo10);
         resumo.linhasCriadas++;
       }
+      if (linhaTotalmenteZerada(linhaTotalizador)) {
+        resumo.linhasOmitidas++;
+        return;
+      }
       linhasSaida.push(registroParaLinha(linhaTotalizador));
       return;
     }
@@ -284,10 +301,17 @@ export function conciliarBalancete(textoCsvAtual, textoCsvAnterior) {
       ? blocoAtual.tipo10.camposChave
       : blocoAnterior.tipo10.camposChave; // bloco inteiro novo, recriado a partir do mês anterior
 
-    linhasSaida.push(
-      registroParaLinha({ camposChave: camposChaveTotalizador, ...totalizadorSomado })
-    );
+    const linhaTotalizadorSomado = { camposChave: camposChaveTotalizador, ...totalizadorSomado };
+    if (linhaTotalmenteZerada(linhaTotalizadorSomado)) {
+      resumo.linhasOmitidas++;
+    } else {
+      linhasSaida.push(registroParaLinha(linhaTotalizadorSomado));
+    }
     for (const detalhe of detalhesCorrigidos) {
+      if (linhaTotalmenteZerada(detalhe)) {
+        resumo.linhasOmitidas++;
+        continue;
+      }
       linhasSaida.push(registroParaLinha(detalhe));
     }
   }
