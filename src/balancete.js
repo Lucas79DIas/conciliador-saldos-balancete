@@ -10,17 +10,33 @@
 //
 // Regra de negócio (TCEMG): SaldoFinal = SaldoInicial +D/-C Debito -D/+C Credito
 //
-// O que este módulo faz:
-//   1. Saldo Final de toda linha fica INTOCADO (valor e natureza originais).
+// O arquivo é organizado em BLOCOS: uma linha tipo "10" (totalizador de uma
+// conta contábil) seguida por N linhas de detalhe (outros tipos), até a
+// próxima linha "10". O campo 2 (conta) + campo 3 (subconta) identificam a
+// qual bloco uma linha pertence — é igual na linha 10 e em todas as linhas
+// de detalhe daquele bloco.
+//
+// O QUE ESTE MÓDULO FAZ (linhas de detalhe, tipo != 10):
+//   1. Saldo Final de toda linha existente fica INTOCADO.
 //   2. Saldo Inicial passa a ser igual ao Saldo Final do mês anterior da
-//      mesma chave (ou 0,00 se a chave não existir no mês anterior).
-//   3. A diferença entre o saldo inicial antigo e o novo é compensada na
-//      movimentação (Debito ou Credito), SEM NUNCA SUBTRAIR — só soma no
-//      lado que precisar, pra nunca gerar débito/crédito negativo.
+//      mesma chave.
+//   3. A diferença é compensada na movimentação (Debito OU Credito, nunca os
+//      dois, nunca subtrai — só soma no lado que precisar).
+//   4. Chave nova (não existia no mês anterior) -> Saldo Inicial = 0,00.
+//   5. Chave que existia no mês anterior mas não existe mais no mês atual ->
+//      a linha é RECRIADA no mês atual, com Saldo Final forçado em 0,00 e a
+//      movimentação calculada para fechar a conta a partir do saldo inicial
+//      (que vem do saldo final do mês anterior).
+//
+// LINHAS TOTALIZADORAS (tipo == 10):
+//   Não usam a lógica acima. Depois que todas as linhas de detalhe de um
+//   bloco já estão corrigidas (incluindo as recriadas), o totalizador do
+//   bloco é recalculado como a SOMA dessas linhas de detalhe.
 
 const NUM_CAMPOS_FINANCEIROS = 6; // SaldoInicial, NatInicial, Debito, Credito, SaldoFinal, NatFinal
+const TIPO_TOTALIZADOR = '10';
 
-/** "1.234,56" / "1234,56" -> 1234.56 (no arquivo não há separador de milhar) */
+/** "1234,56" -> 1234.56 (no arquivo não há separador de milhar) */
 function parseValor(str) {
   return parseFloat(str.replace(',', '.'));
 }
@@ -35,15 +51,21 @@ function paraSigned(valor, natureza) {
   return natureza === 'C' ? -valor : valor;
 }
 
+/** Converte número com sinal de volta em {valor, natureza}. Zero -> D (convenção). */
+function deSigned(signed) {
+  if (signed < 0) return { valor: -signed, natureza: 'C' };
+  return { valor: signed, natureza: 'D' };
+}
+
 /**
  * Quebra uma linha do balancete nos campos de chave + campos financeiros.
- * Retorna null para linhas vazias/inválidas (ex: linha em branco no fim do arquivo).
+ * Retorna null para linhas vazias/inválidas.
  */
 function parseLinha(linha) {
   if (!linha || !linha.trim()) return null;
 
   const campos = linha.split(';');
-  if (campos.length < NUM_CAMPOS_FINANCEIROS) return null;
+  if (campos.length < NUM_CAMPOS_FINANCEIROS + 2) return null; // tipo + conta + subconta + financeiros
 
   const corte = campos.length - NUM_CAMPOS_FINANCEIROS;
   const camposChave = campos.slice(0, corte);
@@ -51,6 +73,8 @@ function parseLinha(linha) {
     campos.slice(corte);
 
   return {
+    tipo: camposChave[0],
+    contaKey: `${camposChave[1]};${camposChave[2]}`, // liga a linha de detalhe ao seu totalizador
     chave: camposChave.join(';'),
     camposChave,
     saldoInicial: parseValor(saldoInicialStr),
@@ -62,96 +86,228 @@ function parseLinha(linha) {
   };
 }
 
-/**
- * Constrói um mapa chave -> {valor, natureza} do saldo final, a partir do
- * CSV do mês anterior. Guarda valor+natureza originais (não só o número com
- * sinal), pra preservar exatamente como veio do arquivo (inclusive em casos
- * de saldo zero, onde a natureza registrada no arquivo pode ser D ou C).
- */
-function construirMapaSaldoFinalAnterior(textoCsvAnterior) {
-  const mapa = new Map();
-  const linhas = textoCsvAnterior.split('\n');
-  for (const linha of linhas) {
-    const registro = parseLinha(linha);
-    if (!registro) continue;
-    mapa.set(registro.chave, { valor: registro.saldoFinal, natureza: registro.natFinal });
+/** Agrupa os registros (já parseados, em ordem) em blocos por conta+subconta. */
+function agruparEmBlocos(registros) {
+  const ordem = []; // contaKeys na ordem em que aparecem
+  const porContaKey = new Map(); // contaKey -> { tipo10, detalhes: [] }
+
+  let blocoAtual = null;
+
+  for (const registro of registros) {
+    if (registro.tipo === TIPO_TOTALIZADOR) {
+      blocoAtual = { tipo10: registro, detalhes: [] };
+      porContaKey.set(registro.contaKey, blocoAtual);
+      ordem.push(registro.contaKey);
+    } else if (blocoAtual) {
+      blocoAtual.detalhes.push(registro);
+    }
+    // detalhe sem bloco aberto ainda (não deveria acontecer no layout real) é ignorado
   }
-  return mapa;
+
+  return { ordem, porContaKey };
+}
+
+/** Corrige uma linha de detalhe existente no mês atual, usando o mês anterior. */
+function corrigirLinhaExistente(registroAtual, registroAnterior) {
+  const encontrouChave = registroAnterior !== undefined;
+
+  const novoSaldoInicial = encontrouChave
+    ? { valor: registroAnterior.saldoFinal, natureza: registroAnterior.natFinal }
+    : { valor: 0, natureza: 'D' };
+
+  const saldoFinalAnteriorSigned = paraSigned(novoSaldoInicial.valor, novoSaldoInicial.natureza);
+  const saldoInicialAntigoSigned = paraSigned(registroAtual.saldoInicial, registroAtual.natInicial);
+  const diferenca = saldoInicialAntigoSigned - saldoFinalAnteriorSigned;
+
+  let { debito, credito } = registroAtual;
+  if (diferenca > 0) debito += diferenca;
+  else if (diferenca < 0) credito += -diferenca;
+
+  return {
+    registro: {
+      ...registroAtual,
+      saldoInicial: novoSaldoInicial.valor,
+      natInicial: novoSaldoInicial.natureza,
+      debito,
+      credito,
+      // saldoFinal e natFinal permanecem os mesmos de registroAtual
+    },
+    encontrouChave,
+    alterada: diferenca !== 0,
+  };
+}
+
+/** Cria uma linha de detalhe nova (existia no mês anterior, não existe no atual), já zerada. */
+function criarLinhaZerada(registroAnterior) {
+  const saldoInicial = { valor: registroAnterior.saldoFinal, natureza: registroAnterior.natFinal };
+  const saldoInicialSigned = paraSigned(saldoInicial.valor, saldoInicial.natureza);
+
+  // parte de débito=0,00 / crédito=0,00 (linha nova) e precisa fechar em saldo final 0,00:
+  // Debito - Credito = SaldoFinal(0) - SaldoInicial = -saldoInicialSigned
+  const necessario = -saldoInicialSigned;
+  const debito = necessario > 0 ? necessario : 0;
+  const credito = necessario < 0 ? -necessario : 0;
+
+  return {
+    tipo: registroAnterior.tipo,
+    contaKey: registroAnterior.contaKey,
+    camposChave: registroAnterior.camposChave,
+    saldoInicial: saldoInicial.valor,
+    natInicial: saldoInicial.natureza,
+    debito,
+    credito,
+    saldoFinal: 0,
+    natFinal: 'D',
+  };
+}
+
+/** Soma uma lista de registros de detalhe e devolve os valores do totalizador. */
+function somarParaTotalizador(registrosDetalhe) {
+  let somaInicial = 0;
+  let somaDebito = 0;
+  let somaCredito = 0;
+  let somaFinal = 0;
+
+  for (const r of registrosDetalhe) {
+    somaInicial += paraSigned(r.saldoInicial, r.natInicial);
+    somaDebito += r.debito;
+    somaCredito += r.credito;
+    somaFinal += paraSigned(r.saldoFinal, r.natFinal);
+  }
+
+  const inicial = deSigned(somaInicial);
+  const final = deSigned(somaFinal);
+
+  return {
+    saldoInicial: inicial.valor,
+    natInicial: inicial.natureza,
+    debito: somaDebito,
+    credito: somaCredito,
+    saldoFinal: final.valor,
+    natFinal: final.natureza,
+  };
+}
+
+function registroParaLinha(registro) {
+  return [
+    ...registro.camposChave,
+    formatValor(registro.saldoInicial),
+    registro.natInicial,
+    formatValor(registro.debito),
+    formatValor(registro.credito),
+    formatValor(registro.saldoFinal),
+    registro.natFinal,
+  ].join(';');
 }
 
 /**
  * Aplica a conciliação: recebe o CSV do mês atual e o CSV do mês anterior,
- * devolve o CSV corrigido (mês atual com saldo inicial ajustado).
- *
- * Também devolve um resumo (quantas linhas mudaram, quantas chaves não
- * encontradas no mês anterior) para exibir na tela.
+ * devolve o CSV corrigido (mês atual com saldo inicial ajustado, linhas
+ * recriadas quando necessário e totalizadores recalculados).
  */
 export function conciliarBalancete(textoCsvAtual, textoCsvAnterior) {
-  const mapaAnterior = construirMapaSaldoFinalAnterior(textoCsvAnterior);
+  const registrosAtual = textoCsvAtual.split('\n').map(parseLinha).filter(Boolean);
+  const registrosAnterior = textoCsvAnterior.split('\n').map(parseLinha).filter(Boolean);
 
-  const linhasAtual = textoCsvAtual.split('\n');
-  const linhasCorrigidas = [];
+  const blocosAtual = agruparEmBlocos(registrosAtual);
+  const blocosAnterior = agruparEmBlocos(registrosAnterior);
 
-  let totalLinhas = 0;
-  let linhasAlteradas = 0;
-  let chavesNaoEncontradas = 0;
+  // mapa chave completa (tipo+conta+...) -> registro do mês anterior, só de linhas de detalhe
+  const mapaDetalheAnterior = new Map();
+  for (const registro of registrosAnterior) {
+    if (registro.tipo !== TIPO_TOTALIZADOR) mapaDetalheAnterior.set(registro.chave, registro);
+  }
 
-  for (const linhaOriginal of linhasAtual) {
-    const registro = parseLinha(linhaOriginal);
+  const linhasSaida = [];
+  const resumo = {
+    totalLinhas: 0,
+    linhasAlteradas: 0,
+    chavesNaoEncontradas: 0,
+    linhasCriadas: 0,
+    totalizadores: 0,
+  };
 
-    // linha vazia (ex: última linha do arquivo) -> mantém como está
-    if (!registro) {
-      linhasCorrigidas.push(linhaOriginal);
-      continue;
+  function processarBloco(contaKey, blocoAtual, blocoAnterior) {
+    const detalhesCorrigidos = [];
+
+    // 1) corrige cada linha de detalhe que já existe no mês atual
+    for (const registroAtual of blocoAtual ? blocoAtual.detalhes : []) {
+      resumo.totalLinhas++;
+      const registroAnteriorCorrespondente = mapaDetalheAnterior.get(registroAtual.chave);
+      const { registro, encontrouChave, alterada } = corrigirLinhaExistente(
+        registroAtual,
+        registroAnteriorCorrespondente
+      );
+      detalhesCorrigidos.push(registro);
+      if (!encontrouChave) resumo.chavesNaoEncontradas++;
+      if (alterada) resumo.linhasAlteradas++;
     }
 
-    totalLinhas++;
-
-    const anterior = mapaAnterior.get(registro.chave); // { valor, natureza } | undefined
-    const encontrouChave = anterior !== undefined;
-    if (!encontrouChave) chavesNaoEncontradas++;
-
-    // chave não encontrada no mês anterior -> saldo inicial deve ser 0,00 (conforme solicitado)
-    const novoSaldoInicial = encontrouChave
-      ? { valor: anterior.valor, natureza: anterior.natureza }
-      : { valor: 0, natureza: 'D' };
-
-    const saldoFinalAnteriorSigned = paraSigned(novoSaldoInicial.valor, novoSaldoInicial.natureza);
-    const saldoInicialAntigoSigned = paraSigned(registro.saldoInicial, registro.natInicial);
-    const saldoFinalSigned = paraSigned(registro.saldoFinal, registro.natFinal);
-
-    // diferença a compensar na movimentação
-    const diferenca = saldoInicialAntigoSigned - saldoFinalAnteriorSigned;
-
-    let { debito, credito } = registro;
-    if (diferenca > 0) {
-      // saldo inicial antigo era "maior" (mais D) que o novo -> precisa de mais débito
-      debito += diferenca;
-    } else if (diferenca < 0) {
-      // saldo inicial antigo era "menor" (mais C) que o novo -> precisa de mais crédito
-      credito += -diferenca;
+    // 2) recria linhas que existiam no mês anterior (mesma conta) e desapareceram do atual
+    const chavesJaPresentes = new Set(detalhesCorrigidos.map((r) => r.chave));
+    for (const registroAnterior of blocoAnterior ? blocoAnterior.detalhes : []) {
+      if (chavesJaPresentes.has(registroAnterior.chave)) continue;
+      const novaLinha = criarLinhaZerada(registroAnterior);
+      detalhesCorrigidos.push(novaLinha);
+      resumo.linhasCriadas++;
     }
 
-    if (diferenca !== 0) linhasAlteradas++;
+    resumo.totalLinhas++; // a linha do totalizador em si
+    resumo.totalizadores++;
 
-    const novosCamposFinanceiros = [
-      formatValor(novoSaldoInicial.valor),
-      novoSaldoInicial.natureza,
-      formatValor(debito),
-      formatValor(credito),
-      formatValor(registro.saldoFinal), // SALDO FINAL NUNCA MUDA
-      registro.natFinal,
-    ];
+    // CASO ESPECIAL: bloco sem nenhuma linha de detalhe (nem original, nem recriada) — algumas
+    // contas no layout não têm breakdown, só a linha "10" sozinha. Nesse caso o totalizador
+    // não tem nada pra somar, então segue a MESMA regra das linhas de detalhe (match direto
+    // por chave / recriação), em vez da soma.
+    if (detalhesCorrigidos.length === 0) {
+      let linhaTotalizador;
+      if (blocoAtual) {
+        const anteriorTotalizador = blocoAnterior ? blocoAnterior.tipo10 : undefined;
+        const { registro, encontrouChave, alterada } = corrigirLinhaExistente(
+          blocoAtual.tipo10,
+          anteriorTotalizador
+        );
+        linhaTotalizador = registro;
+        if (!encontrouChave) resumo.chavesNaoEncontradas++;
+        if (alterada) resumo.linhasAlteradas++;
+      } else {
+        linhaTotalizador = criarLinhaZerada(blocoAnterior.tipo10);
+        resumo.linhasCriadas++;
+      }
+      linhasSaida.push(registroParaLinha(linhaTotalizador));
+      return;
+    }
 
-    linhasCorrigidas.push([...registro.camposChave, ...novosCamposFinanceiros].join(';'));
+    // 3) recalcula o totalizador (10) do bloco como soma das linhas de detalhe já corrigidas
+    const totalizadorSomado = somarParaTotalizador(detalhesCorrigidos);
+    const camposChaveTotalizador = blocoAtual
+      ? blocoAtual.tipo10.camposChave
+      : blocoAnterior.tipo10.camposChave; // bloco inteiro novo, recriado a partir do mês anterior
 
-    // checagem de sanidade (só pra debug, não bloqueia nada):
-    // novoSaldoInicialSigned + debito - credito deve bater com saldoFinalSigned
-    void saldoFinalSigned;
+    linhasSaida.push(
+      registroParaLinha({ camposChave: camposChaveTotalizador, ...totalizadorSomado })
+    );
+    for (const detalhe of detalhesCorrigidos) {
+      linhasSaida.push(registroParaLinha(detalhe));
+    }
+  }
+
+  // processa primeiro os blocos na ordem em que aparecem no mês atual
+  for (const contaKey of blocosAtual.ordem) {
+    const blocoAtual = blocosAtual.porContaKey.get(contaKey);
+    const blocoAnterior = blocosAnterior.porContaKey.get(contaKey);
+    processarBloco(contaKey, blocoAtual, blocoAnterior);
+  }
+
+  // depois, blocos que só existem no mês anterior (conta inteira desapareceu do atual)
+  for (const contaKey of blocosAnterior.ordem) {
+    if (blocosAtual.porContaKey.has(contaKey)) continue; // já processado acima
+    const blocoAnterior = blocosAnterior.porContaKey.get(contaKey);
+    processarBloco(contaKey, null, blocoAnterior);
   }
 
   return {
-    csvCorrigido: linhasCorrigidas.join('\n'),
-    resumo: { totalLinhas, linhasAlteradas, chavesNaoEncontradas },
+    csvCorrigido: linhasSaida.join('\n'),
+    resumo,
   };
 }

@@ -104,7 +104,7 @@ export default function App() {
           <div className="resultado">
             <ul className="resumo">
               <li>
-                <strong>{resultado.resumo.totalLinhas}</strong> linhas no balancete
+                <strong>{resultado.resumo.totalLinhas}</strong> linhas no balancete corrigido
               </li>
               <li>
                 <strong>{resultado.resumo.linhasAlteradas}</strong> linhas com saldo inicial
@@ -113,6 +113,10 @@ export default function App() {
               <li>
                 <strong>{resultado.resumo.chavesNaoEncontradas}</strong> chaves sem
                 correspondência no mês anterior (saldo inicial zerado)
+              </li>
+              <li>
+                <strong>{resultado.resumo.linhasCriadas}</strong> linhas recriadas (existiam no
+                mês anterior e não existem mais no atual)
               </li>
             </ul>
             <button className="botao-secundario" onClick={handleBaixar}>
