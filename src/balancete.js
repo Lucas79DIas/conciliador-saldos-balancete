@@ -301,12 +301,12 @@ export function conciliarBalancete(textoCsvAtual, textoCsvAnterior) {
       ? blocoAtual.tipo10.camposChave
       : blocoAnterior.tipo10.camposChave; // bloco inteiro novo, recriado a partir do mês anterior
 
-    const linhaTotalizadorSomado = { camposChave: camposChaveTotalizador, ...totalizadorSomado };
-    if (linhaTotalmenteZerada(linhaTotalizadorSomado)) {
-      resumo.linhasOmitidas++;
-    } else {
-      linhasSaida.push(registroParaLinha(linhaTotalizadorSomado));
-    }
+    // o totalizador nunca é omitido quando o bloco tem linhas de detalhe — mesmo que a
+    // soma delas zere, o totalizador continua sendo o "cabeçalho" do bloco e precisa
+    // aparecer pra amarrar as linhas de detalhe que ficaram (regra explícita do usuário)
+    linhasSaida.push(
+      registroParaLinha({ camposChave: camposChaveTotalizador, ...totalizadorSomado })
+    );
     for (const detalhe of detalhesCorrigidos) {
       if (linhaTotalmenteZerada(detalhe)) {
         resumo.linhasOmitidas++;
